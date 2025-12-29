@@ -296,9 +296,37 @@ Duration: {job['clip_duration']}s
         duration = duration_map.get(text.lower())
         if duration:
             session['clip_duration'] = duration
+            session['state'] = 'waiting_processor'
+
+            send_message(chat_id,
+                f"<b>{duration}s per clip</b> ✓\n\nWhere to process?",
+                reply_markup={
+                    'keyboard': [
+                        [{'text': '🖥️ Local PC (faster)'}],
+                        [{'text': '☁️ Cloud (when PC off)'}],
+                        [{'text': '🔄 Auto (local first, then cloud)'}]
+                    ],
+                    'resize_keyboard': True,
+                    'one_time_keyboard': True
+                }
+            )
+        else:
+            send_message(chat_id, "Please choose: 30, 45, or 60 seconds")
+
+    elif state == 'waiting_processor':
+        processor_choice = None
+
+        if 'local' in text.lower() or '🖥️' in text:
+            processor_choice = 'local'
+        elif 'cloud' in text.lower() or '☁️' in text:
+            processor_choice = 'cloud'
+        elif 'auto' in text.lower() or '🔄' in text:
+            processor_choice = 'auto'
+
+        if processor_choice:
             session['state'] = 'idle'
 
-            # Create job
+            # Create job with processor preference
             job_id = create_job(
                 chat_id,
                 session['youtube_url'],
@@ -306,29 +334,76 @@ Duration: {job['clip_duration']}s
                 session['clip_duration']
             )
 
-            send_message(chat_id, f"""
-<b>🚀 Job Created!</b>
+            job_queue[job_id]['processor_choice'] = processor_choice
+
+            if processor_choice == 'local':
+                send_message(chat_id, f"""
+<b>🖥️ Local Processing Selected!</b>
 
 📹 Video: {session['youtube_url'][:50]}...
 ✂️ Clips: {session['num_clips']}
-⏱️ Duration: {duration}s each
+⏱️ Duration: {session['clip_duration']}s each
 
-<b>Waiting for processor...</b>
-🖥️ If your PC is ON → Local processing (faster)
-☁️ If PC is OFF → Cloud in {LOCAL_WAIT_SECONDS // 60} minutes
+<b>Waiting for your PC...</b>
+Make sure local_processor.py is running!
 
 Job ID: <code>{job_id}</code>
-            """,
-                reply_markup={'remove_keyboard': True}
-            )
+                """,
+                    reply_markup={'remove_keyboard': True}
+                )
+                # No GitHub fallback for local-only
 
-            # Start background thread to check for local PC
-            thread = threading.Thread(target=check_and_trigger_github, args=(job_id,))
-            thread.daemon = True
-            thread.start()
+            elif processor_choice == 'cloud':
+                job_queue[job_id]['github_triggered'] = True
+                job_queue[job_id]['processor'] = 'github'
 
+                send_message(chat_id, f"""
+<b>☁️ Cloud Processing Selected!</b>
+
+📹 Video: {session['youtube_url'][:50]}...
+✂️ Clips: {session['num_clips']}
+⏱️ Duration: {session['clip_duration']}s each
+
+Starting cloud processing...
+Please wait 10-20 minutes.
+
+Job ID: <code>{job_id}</code>
+                """,
+                    reply_markup={'remove_keyboard': True}
+                )
+
+                # Trigger GitHub Actions immediately
+                success, message = trigger_github_action(job_queue[job_id])
+                if success:
+                    job_queue[job_id]['status'] = 'processing'
+                    send_message(chat_id, "☁️ Cloud processing started!")
+                else:
+                    job_queue[job_id]['status'] = 'failed'
+                    send_message(chat_id, f"❌ Failed to start: {message}")
+
+            else:  # auto
+                send_message(chat_id, f"""
+<b>🔄 Auto Mode Selected!</b>
+
+📹 Video: {session['youtube_url'][:50]}...
+✂️ Clips: {session['num_clips']}
+⏱️ Duration: {session['clip_duration']}s each
+
+<b>Checking for local PC...</b>
+🖥️ If PC online → Local processing (faster)
+☁️ If PC offline → Cloud in {LOCAL_WAIT_SECONDS // 60} min
+
+Job ID: <code>{job_id}</code>
+                """,
+                    reply_markup={'remove_keyboard': True}
+                )
+
+                # Start background thread for auto mode
+                thread = threading.Thread(target=check_and_trigger_github, args=(job_id,))
+                thread.daemon = True
+                thread.start()
         else:
-            send_message(chat_id, "Please choose: 30, 45, or 60 seconds")
+            send_message(chat_id, "Please choose: Local PC, Cloud, or Auto")
 
 
 # ============== API ENDPOINTS FOR LOCAL PC ==============
