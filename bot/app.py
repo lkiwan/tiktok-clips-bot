@@ -1,12 +1,14 @@
 """
 TikTok Clips Bot - Telegram Webhook Server
-Receives YouTube links and triggers GitHub Actions for processing
+Supports HYBRID processing: Local PC (if online) or GitHub Actions (if offline)
 """
 
 import os
 import re
 import json
+import time
 import requests
+import threading
 from flask import Flask, request, jsonify
 from datetime import datetime
 
@@ -16,12 +18,17 @@ app = Flask(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
 GITHUB_REPO = os.environ.get('GITHUB_REPO')  # format: username/repo
-
-# User session storage (in production, use Redis)
-user_sessions = {}
+LOCAL_WAIT_SECONDS = int(os.environ.get('LOCAL_WAIT_SECONDS', 120))  # 2 minutes
 
 # Telegram API base URL
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+
+# User session storage
+user_sessions = {}
+
+# Job queue for hybrid processing
+# Jobs wait here for local PC to pick up, or get sent to GitHub Actions
+job_queue = {}  # job_id -> job_data
 
 
 def send_message(chat_id, text, reply_markup=None):
@@ -36,14 +43,6 @@ def send_message(chat_id, text, reply_markup=None):
 
     response = requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
     return response.json()
-
-
-def send_typing(chat_id):
-    """Send typing indicator"""
-    requests.post(f"{TELEGRAM_API}/sendChatAction", json={
-        'chat_id': chat_id,
-        'action': 'typing'
-    })
 
 
 def is_youtube_url(text):
@@ -76,8 +75,30 @@ def extract_youtube_url(text):
     return None
 
 
-def trigger_github_action(chat_id, youtube_url, num_clips, clip_duration):
-    """Trigger GitHub Actions workflow via repository_dispatch"""
+def generate_job_id():
+    """Generate unique job ID"""
+    return f"job_{int(time.time() * 1000)}"
+
+
+def create_job(chat_id, youtube_url, num_clips, clip_duration):
+    """Create a new processing job"""
+    job_id = generate_job_id()
+    job_queue[job_id] = {
+        'job_id': job_id,
+        'chat_id': str(chat_id),
+        'youtube_url': youtube_url,
+        'num_clips': num_clips,
+        'clip_duration': clip_duration,
+        'status': 'pending',  # pending, processing, completed, failed
+        'created_at': time.time(),
+        'processor': None,  # 'local' or 'github'
+        'github_triggered': False
+    }
+    return job_id
+
+
+def trigger_github_action(job_data):
+    """Trigger GitHub Actions workflow"""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False, "GitHub not configured"
 
@@ -89,11 +110,11 @@ def trigger_github_action(chat_id, youtube_url, num_clips, clip_duration):
     payload = {
         'event_type': 'process_video',
         'client_payload': {
-            'chat_id': str(chat_id),
-            'youtube_url': youtube_url,
-            'num_clips': num_clips,
-            'clip_duration': clip_duration,
-            'timestamp': datetime.now().isoformat()
+            'chat_id': job_data['chat_id'],
+            'youtube_url': job_data['youtube_url'],
+            'num_clips': job_data['num_clips'],
+            'clip_duration': job_data['clip_duration'],
+            'job_id': job_data['job_id']
         }
     }
 
@@ -102,7 +123,35 @@ def trigger_github_action(chat_id, youtube_url, num_clips, clip_duration):
     if response.status_code == 204:
         return True, "Workflow triggered"
     else:
-        return False, f"Error: {response.status_code} - {response.text}"
+        return False, f"Error: {response.status_code}"
+
+
+def check_and_trigger_github(job_id):
+    """Background task: Wait for local PC, then trigger GitHub if needed"""
+    time.sleep(LOCAL_WAIT_SECONDS)
+
+    if job_id not in job_queue:
+        return
+
+    job = job_queue[job_id]
+
+    # If still pending (local PC didn't pick it up), trigger GitHub
+    if job['status'] == 'pending' and not job['github_triggered']:
+        job['github_triggered'] = True
+        job['processor'] = 'github'
+
+        send_message(
+            job['chat_id'],
+            "💻 Local PC not available. Using cloud processing..."
+        )
+
+        success, message = trigger_github_action(job)
+        if success:
+            job['status'] = 'processing'
+            send_message(job['chat_id'], "☁️ Cloud processing started! Please wait 10-20 minutes.")
+        else:
+            job['status'] = 'failed'
+            send_message(job['chat_id'], f"❌ Failed to start processing: {message}")
 
 
 def handle_message(message):
@@ -121,20 +170,24 @@ def handle_message(message):
     if text == '/start':
         session['state'] = 'idle'
         send_message(chat_id, f"""
-<b>Welcome {user_name}!</b>
+<b>Welcome {user_name}!</b> 🎬
 
 I turn YouTube videos into TikTok-ready clips.
 
 <b>How to use:</b>
 1. Send me a YouTube link
 2. Choose number of clips (1-5)
-3. Choose clip duration (30s, 45s, 60s)
-4. Wait for processing (~10-20 min)
-5. Get clips with captions + hashtags!
+3. Choose clip duration
+4. Wait for processing
+5. Get clips with captions!
+
+<b>Hybrid Mode:</b>
+🖥️ If your PC is ON → Fast local processing
+☁️ If your PC is OFF → Cloud processing
 
 <b>Commands:</b>
 /start - Show this message
-/status - Check if processing
+/status - Check processing status
 /help - Get help
 
 Send me a YouTube link to start!
@@ -147,55 +200,61 @@ Send me a YouTube link to start!
 <b>Help</b>
 
 <b>Supported links:</b>
-- youtube.com/watch?v=...
-- youtu.be/...
-- youtube.com/shorts/...
+• youtube.com/watch?v=...
+• youtu.be/...
+• youtube.com/shorts/...
+
+<b>Processing modes:</b>
+🖥️ <b>Local</b> - When your PC is running the local script (faster)
+☁️ <b>Cloud</b> - When PC is off, uses GitHub Actions
 
 <b>Processing time:</b>
-- Short videos (< 10 min): ~5-10 min
-- Medium videos (10-30 min): ~10-15 min
-- Long videos (30+ min): ~15-25 min
+• Local: 2-10 minutes
+• Cloud: 10-20 minutes
 
 <b>Tips:</b>
-- Clips are optimized for TikTok (9:16)
-- Includes auto-generated subtitles
-- Captions and hashtags provided
-
-<b>Issues?</b>
-Just send another link to try again.
+• Keep your PC on for faster processing
+• Clips are optimized for TikTok (9:16)
+• Includes auto-generated subtitles
         """)
         return
 
     # Handle /status command
     if text == '/status':
-        if session.get('processing'):
+        # Find user's jobs
+        user_jobs = [j for j in job_queue.values() if j['chat_id'] == str(chat_id)]
+        active_jobs = [j for j in user_jobs if j['status'] in ['pending', 'processing']]
+
+        if active_jobs:
+            job = active_jobs[-1]
+            processor = job.get('processor', 'waiting')
+            status_emoji = '⏳' if job['status'] == 'pending' else '🔄'
             send_message(chat_id, f"""
-<b>Status: Processing</b>
+<b>{status_emoji} Job Status</b>
 
-Video: {session.get('youtube_url', 'Unknown')}
-Clips: {session.get('num_clips', '?')}
-Duration: {session.get('clip_duration', '?')}s
+Status: {job['status'].upper()}
+Processor: {processor}
+URL: {job['youtube_url'][:50]}...
+Clips: {job['num_clips']}
+Duration: {job['clip_duration']}s
 
-Started: {session.get('started_at', 'Unknown')}
-
-Please wait, I'll notify you when ready!
+{'Waiting for local PC or cloud...' if job['status'] == 'pending' else 'Processing in progress...'}
             """)
         else:
-            send_message(chat_id, "No video processing. Send me a YouTube link!")
+            send_message(chat_id, "No active jobs. Send me a YouTube link!")
         return
 
     # State machine for conversation flow
     state = session.get('state', 'idle')
 
     if state == 'idle':
-        # Expecting YouTube URL
         if is_youtube_url(text):
             url = extract_youtube_url(text)
             session['youtube_url'] = url
             session['state'] = 'waiting_num_clips'
 
             send_message(chat_id,
-                "<b>Got it!</b>\n\nHow many clips do you want?",
+                "✅ <b>Got it!</b>\n\nHow many clips do you want?",
                 reply_markup={
                     'keyboard': [
                         [{'text': '1'}, {'text': '2'}, {'text': '3'}],
@@ -209,13 +268,12 @@ Please wait, I'll notify you when ready!
             send_message(chat_id, "Please send me a valid YouTube link.\n\nExample: https://youtube.com/watch?v=...")
 
     elif state == 'waiting_num_clips':
-        # Expecting number of clips
         if text.isdigit() and 1 <= int(text) <= 5:
             session['num_clips'] = int(text)
             session['state'] = 'waiting_duration'
 
             send_message(chat_id,
-                f"<b>{text} clips</b>\n\nMax duration per clip?",
+                f"<b>{text} clips</b> ✓\n\nMax duration per clip?",
                 reply_markup={
                     'keyboard': [
                         [{'text': '30 seconds'}, {'text': '45 seconds'}],
@@ -229,7 +287,6 @@ Please wait, I'll notify you when ready!
             send_message(chat_id, "Please choose a number between 1 and 5")
 
     elif state == 'waiting_duration':
-        # Expecting clip duration
         duration_map = {
             '30': 30, '30 seconds': 30, '30s': 30,
             '45': 45, '45 seconds': 45, '45s': 45,
@@ -239,63 +296,50 @@ Please wait, I'll notify you when ready!
         duration = duration_map.get(text.lower())
         if duration:
             session['clip_duration'] = duration
-            session['state'] = 'processing'
-            session['processing'] = True
-            session['started_at'] = datetime.now().strftime('%H:%M:%S')
+            session['state'] = 'idle'
 
-            # Remove keyboard
-            send_message(chat_id,
-                f"""
-<b>Starting processing!</b>
-
-Video: {session['youtube_url']}
-Clips: {session['num_clips']}
-Duration: {duration}s each
-
-This will take 10-20 minutes.
-I'll send you the clips when ready!
-                """,
-                reply_markup={'remove_keyboard': True}
-            )
-
-            # Trigger GitHub Action
-            success, message = trigger_github_action(
+            # Create job
+            job_id = create_job(
                 chat_id,
                 session['youtube_url'],
                 session['num_clips'],
                 session['clip_duration']
             )
 
-            if success:
-                send_message(chat_id, "Processing started! Please wait...")
-            else:
-                session['state'] = 'idle'
-                session['processing'] = False
-                send_message(chat_id, f"Error starting process: {message}\n\nPlease try again.")
+            send_message(chat_id, f"""
+<b>🚀 Job Created!</b>
+
+📹 Video: {session['youtube_url'][:50]}...
+✂️ Clips: {session['num_clips']}
+⏱️ Duration: {duration}s each
+
+<b>Waiting for processor...</b>
+🖥️ If your PC is ON → Local processing (faster)
+☁️ If PC is OFF → Cloud in {LOCAL_WAIT_SECONDS // 60} minutes
+
+Job ID: <code>{job_id}</code>
+            """,
+                reply_markup={'remove_keyboard': True}
+            )
+
+            # Start background thread to check for local PC
+            thread = threading.Thread(target=check_and_trigger_github, args=(job_id,))
+            thread.daemon = True
+            thread.start()
+
         else:
             send_message(chat_id, "Please choose: 30, 45, or 60 seconds")
 
 
-def handle_callback(callback_query):
-    """Handle callback query from inline buttons"""
-    chat_id = callback_query['message']['chat']['id']
-    data = callback_query.get('data', '')
-
-    # Answer callback to remove loading state
-    requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
-        'callback_query_id': callback_query['id']
-    })
-
-    # Process callback data
-    # (Add callback handling if needed)
-
+# ============== API ENDPOINTS FOR LOCAL PC ==============
 
 @app.route('/')
 def home():
     """Health check endpoint"""
     return jsonify({
         'status': 'running',
-        'bot': 'TikTok Clips Bot',
+        'bot': 'TikTok Clips Bot (Hybrid)',
+        'pending_jobs': len([j for j in job_queue.values() if j['status'] == 'pending']),
         'time': datetime.now().isoformat()
     })
 
@@ -311,49 +355,143 @@ def webhook():
     """Telegram webhook endpoint"""
     try:
         update = request.get_json()
-
         if 'message' in update:
             handle_message(update['message'])
-        elif 'callback_query' in update:
-            handle_callback(update['callback_query'])
-
         return jsonify({'ok': True})
-
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({'ok': False, 'error': str(e)}), 500
 
 
-@app.route('/notify', methods=['POST'])
-def notify():
+@app.route('/api/jobs/pending', methods=['GET'])
+def get_pending_jobs():
     """
-    Endpoint for GitHub Actions to notify completion
-    Called by the workflow when processing is done
+    API endpoint for local PC to get pending jobs
+    Local PC polls this every 30 seconds
     """
-    try:
-        data = request.get_json()
-        chat_id = data.get('chat_id')
-        status = data.get('status')
+    pending = [
+        job for job in job_queue.values()
+        if job['status'] == 'pending' and not job['github_triggered']
+    ]
+    return jsonify({
+        'jobs': pending,
+        'count': len(pending)
+    })
 
-        if status == 'success':
-            clips = data.get('clips', [])
-            message = "<b>Your clips are ready!</b>\n\n"
-            message += f"Generated {len(clips)} clips.\n"
-            message += "Sending them now..."
-            send_message(chat_id, message)
 
-        elif status == 'error':
-            error = data.get('error', 'Unknown error')
-            send_message(chat_id, f"<b>Processing failed</b>\n\nError: {error}\n\nPlease try again.")
+@app.route('/api/jobs/<job_id>/claim', methods=['POST'])
+def claim_job(job_id):
+    """
+    Local PC claims a job to process
+    Prevents GitHub Actions from processing it
+    """
+    if job_id not in job_queue:
+        return jsonify({'ok': False, 'error': 'Job not found'}), 404
 
-        # Reset session
-        if chat_id in user_sessions:
-            user_sessions[chat_id] = {'state': 'idle'}
+    job = job_queue[job_id]
 
-        return jsonify({'ok': True})
+    if job['status'] != 'pending':
+        return jsonify({'ok': False, 'error': 'Job already claimed'}), 400
 
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+    job['status'] = 'processing'
+    job['processor'] = 'local'
+    job['claimed_at'] = time.time()
+
+    # Notify user
+    send_message(
+        job['chat_id'],
+        "🖥️ <b>Local PC connected!</b>\nProcessing on your computer (faster)..."
+    )
+
+    return jsonify({
+        'ok': True,
+        'job': job
+    })
+
+
+@app.route('/api/jobs/<job_id>/complete', methods=['POST'])
+def complete_job(job_id):
+    """
+    Mark job as completed
+    Called by local PC after sending clips
+    """
+    if job_id not in job_queue:
+        return jsonify({'ok': False, 'error': 'Job not found'}), 404
+
+    job = job_queue[job_id]
+    job['status'] = 'completed'
+    job['completed_at'] = time.time()
+
+    return jsonify({'ok': True})
+
+
+@app.route('/api/jobs/<job_id>/fail', methods=['POST'])
+def fail_job(job_id):
+    """
+    Mark job as failed
+    Optionally fall back to GitHub Actions
+    """
+    if job_id not in job_queue:
+        return jsonify({'ok': False, 'error': 'Job not found'}), 404
+
+    data = request.get_json() or {}
+    error = data.get('error', 'Unknown error')
+    fallback = data.get('fallback_to_github', True)
+
+    job = job_queue[job_id]
+
+    if fallback and not job['github_triggered']:
+        # Try GitHub Actions as fallback
+        job['github_triggered'] = True
+        job['processor'] = 'github'
+        job['status'] = 'processing'
+
+        send_message(
+            job['chat_id'],
+            f"⚠️ Local processing failed: {error}\n\n☁️ Falling back to cloud..."
+        )
+
+        trigger_github_action(job)
+    else:
+        job['status'] = 'failed'
+        send_message(
+            job['chat_id'],
+            f"❌ Processing failed: {error}"
+        )
+
+    return jsonify({'ok': True})
+
+
+@app.route('/api/jobs/<job_id>/progress', methods=['POST'])
+def update_progress(job_id):
+    """
+    Update job progress (for status messages)
+    """
+    if job_id not in job_queue:
+        return jsonify({'ok': False, 'error': 'Job not found'}), 404
+
+    data = request.get_json() or {}
+    message = data.get('message', '')
+
+    job = job_queue[job_id]
+
+    if message:
+        send_message(job['chat_id'], message)
+
+    return jsonify({'ok': True})
+
+
+# ============== CLEANUP OLD JOBS ==============
+
+def cleanup_old_jobs():
+    """Remove jobs older than 1 hour"""
+    current_time = time.time()
+    old_jobs = [
+        job_id for job_id, job in job_queue.items()
+        if current_time - job['created_at'] > 3600  # 1 hour
+    ]
+    for job_id in old_jobs:
+        del job_queue[job_id]
 
 
 if __name__ == '__main__':
