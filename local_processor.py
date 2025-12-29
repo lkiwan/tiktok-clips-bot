@@ -22,9 +22,15 @@ import sys
 import time
 import json
 import tempfile
-import requests
 import subprocess
 from pathlib import Path
+
+# Fix SSL certificate issue on Windows
+import certifi
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+
+import requests
 
 # ============== CONFIGURATION ==============
 # Change these settings:
