@@ -104,7 +104,9 @@ class EnhancedClipGenerator:
 
         # Step 2: Generate subtitles
         subtitle_path = output_path.with_suffix('.ass')
+        print(f"    Subtitle style: {self.subtitle_style}")
         subtitle_filter = self._generate_subtitles(transcript, start, end, subtitle_path)
+        print(f"    Subtitle filter: {subtitle_filter[:100] if subtitle_filter else 'None'}...")
 
         # Combine filters
         if subtitle_filter:
@@ -235,11 +237,18 @@ class EnhancedClipGenerator:
             str(output_path)
         ]
 
+        print(f"    FFmpeg filter: {video_filter}")
+
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                print(f"    FFmpeg failed (exit {result.returncode})")
+                if result.stderr:
+                    # Print last 500 chars of stderr for debugging
+                    print(f"    FFmpeg stderr: ...{result.stderr[-500:]}")
             return result.returncode == 0
         except Exception as e:
-            print(f"    FFmpeg error: {e}")
+            print(f"    FFmpeg exception: {e}")
             return False
 
     def _create_simple_clip(self, video_path, start, duration, output_path, clip_data):
