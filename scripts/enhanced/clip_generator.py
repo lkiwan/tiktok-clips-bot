@@ -169,11 +169,17 @@ class EnhancedClipGenerator:
 
     def _generate_subtitles(self, transcript, start, end, output_path):
         """Generate subtitles and return FFmpeg filter"""
+        word_count = len(transcript.get('word_segments', []))
+        seg_count = len(transcript.get('segments', []))
+        print(f"    Transcript has {word_count} words, {seg_count} segments")
+
         if not ASS_SUBTITLES_AVAILABLE:
+            print("    ASS subtitles NOT available, using SRT fallback")
             return self._generate_srt_subtitles(transcript, start, end, output_path.with_suffix('.srt'))
 
         try:
             # Use ASS subtitles with karaoke
+            print(f"    Generating ASS subtitles with style: {self.subtitle_style}")
             ass_path = generate_ass_subtitles(
                 transcript, start, end, output_path,
                 style=self.subtitle_style,
@@ -183,9 +189,12 @@ class EnhancedClipGenerator:
                     'font_size': self.config.get('font_size', 48)
                 }
             )
+            print(f"    ASS file created: {ass_path}")
             return get_ffmpeg_subtitle_filter(ass_path)
         except Exception as e:
-            print(f"    ASS subtitle generation failed: {e}")
+            print(f"    ASS subtitle generation FAILED: {e}")
+            import traceback
+            traceback.print_exc()
             return self._generate_srt_subtitles(transcript, start, end, output_path.with_suffix('.srt'))
 
     def _generate_srt_subtitles(self, transcript, start, end, srt_path):
