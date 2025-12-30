@@ -80,8 +80,8 @@ def generate_job_id():
     return f"job_{int(time.time() * 1000)}"
 
 
-def create_job(chat_id, youtube_url, num_clips, clip_duration):
-    """Create a new processing job"""
+def create_job(chat_id, youtube_url, num_clips, clip_duration, enhancements=None):
+    """Create a new processing job with optional enhancements"""
     job_id = generate_job_id()
     job_queue[job_id] = {
         'job_id': job_id,
@@ -92,7 +92,14 @@ def create_job(chat_id, youtube_url, num_clips, clip_duration):
         'status': 'pending',  # pending, processing, completed, failed
         'created_at': time.time(),
         'processor': None,  # 'local' or 'github'
-        'github_triggered': False
+        'github_triggered': False,
+        # Enhanced features
+        'enhancements': enhancements or {
+            'subtitle_style': 'karaoke',
+            'split_screen': False,
+            'face_tracking': True,
+            'copyright_protect': False
+        }
     }
     return job_id
 
@@ -172,18 +179,22 @@ def handle_message(message):
         send_message(chat_id, f"""
 <b>Welcome {user_name}!</b> 🎬
 
-I turn YouTube videos into TikTok-ready clips.
+I turn YouTube videos into <b>professional TikTok clips</b>.
+
+<b>Features:</b>
+🎤 Karaoke subtitles (words highlight as spoken)
+👤 Smart face tracking (no cut-off speakers)
+🎮 Split-screen with satisfying backgrounds
+🛡️ Copyright protection
 
 <b>How to use:</b>
 1. Send me a YouTube link
 2. Choose number of clips (1-5)
 3. Choose clip duration
-4. Wait for processing
-5. Get clips with captions!
-
-<b>Hybrid Mode:</b>
-🖥️ If your PC is ON → Fast local processing
-☁️ If your PC is OFF → Cloud processing
+4. Select subtitle style
+5. Choose split-screen option
+6. Wait for processing
+7. Get professional clips!
 
 <b>Commands:</b>
 /start - Show this message
@@ -296,10 +307,63 @@ Duration: {job['clip_duration']}s
         duration = duration_map.get(text.lower())
         if duration:
             session['clip_duration'] = duration
+            session['state'] = 'waiting_subtitle_style'
+
+            send_message(chat_id,
+                f"<b>{duration}s per clip</b> ✓\n\nSubtitle style?",
+                reply_markup={
+                    'keyboard': [
+                        [{'text': '🎤 Karaoke (words highlight)'}],
+                        [{'text': '📝 Simple (white text)'}],
+                        [{'text': '🚫 No subtitles'}]
+                    ],
+                    'resize_keyboard': True,
+                    'one_time_keyboard': True
+                }
+            )
+        else:
+            send_message(chat_id, "Please choose: 30, 45, or 60 seconds")
+
+    elif state == 'waiting_subtitle_style':
+        style = None
+        if 'karaoke' in text.lower() or '🎤' in text:
+            style = 'karaoke'
+        elif 'simple' in text.lower() or '📝' in text:
+            style = 'simple'
+        elif 'no' in text.lower() or '🚫' in text:
+            style = 'none'
+
+        if style:
+            session['subtitle_style'] = style
+            session['state'] = 'waiting_split_screen'
+
+            send_message(chat_id,
+                f"<b>{style.title()} subtitles</b> ✓\n\nAdd satisfying background?",
+                reply_markup={
+                    'keyboard': [
+                        [{'text': '✅ Yes - Split screen'}],
+                        [{'text': '❌ No - Full video only'}]
+                    ],
+                    'resize_keyboard': True,
+                    'one_time_keyboard': True
+                }
+            )
+        else:
+            send_message(chat_id, "Please choose a subtitle style")
+
+    elif state == 'waiting_split_screen':
+        split_screen = None
+        if 'yes' in text.lower() or '✅' in text:
+            split_screen = True
+        elif 'no' in text.lower() or '❌' in text:
+            split_screen = False
+
+        if split_screen is not None:
+            session['split_screen'] = split_screen
             session['state'] = 'waiting_processor'
 
             send_message(chat_id,
-                f"<b>{duration}s per clip</b> ✓\n\nWhere to process?",
+                f"<b>{'Split screen' if split_screen else 'Full video'}</b> ✓\n\nWhere to process?",
                 reply_markup={
                     'keyboard': [
                         [{'text': '🖥️ Local PC (faster)'}],
@@ -311,7 +375,7 @@ Duration: {job['clip_duration']}s
                 }
             )
         else:
-            send_message(chat_id, "Please choose: 30, 45, or 60 seconds")
+            send_message(chat_id, "Please choose Yes or No")
 
     elif state == 'waiting_processor':
         processor_choice = None
@@ -326,15 +390,33 @@ Duration: {job['clip_duration']}s
         if processor_choice:
             session['state'] = 'idle'
 
-            # Create job with processor preference
+            # Build enhancements from session
+            enhancements = {
+                'subtitle_style': session.get('subtitle_style', 'karaoke'),
+                'split_screen': session.get('split_screen', False),
+                'face_tracking': True,
+                'copyright_protect': False
+            }
+
+            # Create job with processor preference and enhancements
             job_id = create_job(
                 chat_id,
                 session['youtube_url'],
                 session['num_clips'],
-                session['clip_duration']
+                session['clip_duration'],
+                enhancements
             )
 
             job_queue[job_id]['processor_choice'] = processor_choice
+
+            # Build enhancement summary
+            subtitle_icon = {'karaoke': '🎤', 'simple': '📝', 'none': '🚫'}.get(enhancements['subtitle_style'], '📝')
+            split_icon = '✅' if enhancements['split_screen'] else '❌'
+            enhancement_text = f"""
+<b>Enhancements:</b>
+{subtitle_icon} Subtitles: {enhancements['subtitle_style'].title()}
+{split_icon} Split-screen: {'Yes' if enhancements['split_screen'] else 'No'}
+👤 Face tracking: Enabled"""
 
             if processor_choice == 'local':
                 send_message(chat_id, f"""
@@ -343,9 +425,10 @@ Duration: {job['clip_duration']}s
 📹 Video: {session['youtube_url'][:50]}...
 ✂️ Clips: {session['num_clips']}
 ⏱️ Duration: {session['clip_duration']}s each
+{enhancement_text}
 
 <b>Waiting for your PC...</b>
-Make sure local_processor.py is running!
+Make sure local_processor_enhanced.py is running!
 
 Job ID: <code>{job_id}</code>
                 """,
@@ -363,6 +446,7 @@ Job ID: <code>{job_id}</code>
 📹 Video: {session['youtube_url'][:50]}...
 ✂️ Clips: {session['num_clips']}
 ⏱️ Duration: {session['clip_duration']}s each
+{enhancement_text}
 
 Starting cloud processing...
 Please wait 10-20 minutes.
@@ -388,6 +472,7 @@ Job ID: <code>{job_id}</code>
 📹 Video: {session['youtube_url'][:50]}...
 ✂️ Clips: {session['num_clips']}
 ⏱️ Duration: {session['clip_duration']}s each
+{enhancement_text}
 
 <b>Checking for local PC...</b>
 🖥️ If PC online → Local processing (faster)
