@@ -212,13 +212,35 @@ def select_clips_ai(transcript, video_info, num_clips, max_duration):
         from groq import Groq
         client = Groq(api_key=GROQ_API_KEY)
 
+        total_duration = video_info.get('duration', 0)
+
+        # Calculate skip times for intro/outro
+        if total_duration < 300:
+            skip_intro, skip_outro = 30, 30
+        elif total_duration < 1200:
+            skip_intro, skip_outro = 60, 60
+        else:
+            skip_intro, skip_outro = 90, 90
+
+        # Filter segments to exclude intro/outro
+        usable_start = skip_intro
+        usable_end = total_duration - skip_outro
+
         segments_text = []
         for seg in transcript['segments'][:200]:
-            segments_text.append(f"[{seg['start']:.1f}s - {seg['end']:.1f}s]: {seg['text']}")
+            if seg['start'] >= usable_start and seg['end'] <= usable_end:
+                segments_text.append(f"[{seg['start']:.1f}s - {seg['end']:.1f}s]: {seg['text']}")
 
         prompt = f"""Find the {num_clips} BEST moments for TikTok clips from this transcript.
 
 VIDEO: {video_info.get('title', 'Unknown')}
+DURATION: {total_duration}s
+
+IMPORTANT:
+- AVOID the intro (first {skip_intro}s) and outro (last {skip_outro}s)
+- Select clips between {usable_start}s and {usable_end}s only
+- Each clip should be 45-60 seconds for TikTok monetization
+- Focus on the most engaging, viral-worthy moments
 
 TRANSCRIPT:
 {chr(10).join(segments_text)}
@@ -246,21 +268,55 @@ Return JSON only:
 
 
 def select_clips_simple(transcript, num_clips, max_duration):
-    """Simple clip selection based on timing"""
+    """Simple clip selection based on timing - avoids intro and outro"""
     segments = transcript['segments']
     if not segments:
         return []
 
     total_duration = segments[-1]['end']
+
+    # Skip intro and outro (proportional to video length)
+    # For short videos (<5min): skip 30s intro/outro
+    # For medium videos (5-20min): skip 60s intro/outro
+    # For long videos (>20min): skip 90s intro/outro
+    if total_duration < 300:  # < 5 minutes
+        skip_intro = 30
+        skip_outro = 30
+    elif total_duration < 1200:  # < 20 minutes
+        skip_intro = 60
+        skip_outro = 60
+    else:  # > 20 minutes
+        skip_intro = 90
+        skip_outro = 90
+
+    # Calculate usable range
+    usable_start = min(skip_intro, total_duration * 0.1)  # Max 10% of video
+    usable_end = max(total_duration - skip_outro, total_duration * 0.9)  # Min 90% of video
+    usable_duration = usable_end - usable_start
+
+    if usable_duration < max_duration:
+        # Video too short, use full duration
+        usable_start = 0
+        usable_end = total_duration
+        usable_duration = total_duration
+
+    log(f"Skipping intro ({usable_start:.0f}s) and outro (after {usable_end:.0f}s)")
+
     clips = []
-    spacing = total_duration / (num_clips + 1)
+    spacing = usable_duration / (num_clips + 1)
 
     for i in range(num_clips):
-        target_time = spacing * (i + 1)
-        best_segment = min(segments, key=lambda s: abs(s['start'] - target_time))
+        target_time = usable_start + spacing * (i + 1)
 
-        start = max(0, best_segment['start'] - 5)
-        end = min(total_duration, start + min(max_duration, 60))
+        # Find best segment in usable range
+        usable_segments = [s for s in segments if s['start'] >= usable_start and s['end'] <= usable_end]
+        if not usable_segments:
+            usable_segments = segments
+
+        best_segment = min(usable_segments, key=lambda s: abs(s['start'] - target_time))
+
+        start = max(usable_start, best_segment['start'] - 5)
+        end = min(usable_end, start + min(max_duration, 60))
 
         clip_text = ""
         for seg in segments:
