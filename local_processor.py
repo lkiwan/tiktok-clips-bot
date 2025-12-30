@@ -30,6 +30,10 @@ import certifi
 os.environ['SSL_CERT_FILE'] = certifi.where()
 os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
+# Fix Windows console encoding
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 import requests
 
 # ============== CONFIGURATION ==============

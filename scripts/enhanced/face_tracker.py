@@ -7,11 +7,17 @@ Uses MediaPipe for fast, accurate face detection
 import cv2
 import numpy as np
 
+MEDIAPIPE_AVAILABLE = False
+mp = None
+
 try:
     import mediapipe as mp
-    MEDIAPIPE_AVAILABLE = True
+    # Check if mediapipe has the required modules
+    if hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_detection'):
+        MEDIAPIPE_AVAILABLE = True
+    else:
+        print("[WARNING] MediaPipe installed but missing face_detection module.")
 except ImportError:
-    MEDIAPIPE_AVAILABLE = False
     print("[WARNING] MediaPipe not installed. Face tracking disabled.")
     print("Install with: pip install mediapipe")
 

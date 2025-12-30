@@ -11,10 +11,11 @@ from pathlib import Path
 
 # Import enhanced modules
 try:
-    from .face_tracker import FaceTracker, get_smart_crop_filter
-    FACE_TRACKING_AVAILABLE = True
+    from .face_tracker import FaceTracker, get_smart_crop_filter, MEDIAPIPE_AVAILABLE
+    FACE_TRACKING_AVAILABLE = MEDIAPIPE_AVAILABLE  # Only available if MediaPipe works
 except ImportError:
     FACE_TRACKING_AVAILABLE = False
+    MEDIAPIPE_AVAILABLE = False
 
 try:
     from .subtitle_renderer import generate_ass_subtitles, get_ffmpeg_subtitle_filter, SubtitleStyle
