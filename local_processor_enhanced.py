@@ -274,19 +274,21 @@ def select_clips_simple(transcript, num_clips, max_duration):
     return clips
 
 
-def generate_enhanced_clips(video_path, clips, transcript, output_dir):
+def generate_enhanced_clips(video_path, clips, transcript, output_dir, config=None):
     """Generate clips with enhanced features"""
     from scripts.enhanced import generate_enhanced_clips as gen_clips
 
-    config = {
-        'enable_face_tracking': ENABLE_FACE_TRACKING,
-        'subtitle_style': SUBTITLE_STYLE,
-        'enable_split_screen': ENABLE_SPLIT_SCREEN,
-        'split_layout': SPLIT_LAYOUT,
-        'satisfying_folder': SATISFYING_FOLDER,
-        'output_width': 1080,
-        'output_height': 1920
-    }
+    # Use provided config or fall back to defaults
+    if config is None:
+        config = {
+            'enable_face_tracking': ENABLE_FACE_TRACKING,
+            'subtitle_style': SUBTITLE_STYLE,
+            'enable_split_screen': ENABLE_SPLIT_SCREEN,
+            'split_layout': SPLIT_LAYOUT,
+            'satisfying_folder': SATISFYING_FOLDER,
+            'output_width': 1080,
+            'output_height': 1920
+        }
 
     return gen_clips(video_path, clips, transcript, output_dir, config)
 
