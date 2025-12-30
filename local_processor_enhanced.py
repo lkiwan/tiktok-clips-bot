@@ -47,7 +47,10 @@ ENABLE_FACE_TRACKING = True     # Smart cropping for panoramic videos
 SUBTITLE_STYLE = 'karaoke'      # 'karaoke', 'highlight', 'box', 'simple'
 ENABLE_SPLIT_SCREEN = False     # Add satisfying background
 SPLIT_LAYOUT = 'top_bottom'     # 'top_bottom', 'bottom_top', 'left_right'
-SATISFYING_FOLDER = './assets/satisfying_videos'
+
+# Get absolute path to satisfying videos folder
+SCRIPT_DIR = Path(__file__).parent.absolute()
+SATISFYING_FOLDER = str(SCRIPT_DIR / 'assets' / 'satisfying_videos')
 
 # ===========================================
 

@@ -73,9 +73,10 @@ class VideoMerger:
         """
         if satisfying_video is None:
             satisfying_video = self.select_random_satisfying(category)
+            print(f"    Selected satisfying video: {satisfying_video}")
 
         if satisfying_video is None:
-            print("[WARNING] No satisfying videos available. Creating without split screen.")
+            print("    [WARNING] No satisfying videos available. Creating without split screen.")
             return self._create_simple_clip(main_video, output_path, start_time, duration)
 
         # Calculate dimensions
@@ -139,10 +140,12 @@ class VideoMerger:
         ])
 
         try:
+            print(f"    Merging with layout: {self.layout}")
+            print(f"    Main: {main_height}px, Satisfying: {sat_height}px")
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
 
             if result.returncode != 0:
-                print(f"FFmpeg error: {result.stderr[:500]}")
+                print(f"    FFmpeg merge failed: {result.stderr[-500:]}")
                 return self._create_simple_clip(main_video, output_path, start_time, duration)
 
             return {
@@ -165,7 +168,7 @@ class VideoMerger:
             f"[0:v]scale={main_w}:{main_h}:force_original_aspect_ratio=increase,"
             f"crop={main_w}:{main_h}[main];"
             f"[1:v]scale={sat_w}:{sat_h}:force_original_aspect_ratio=increase,"
-            f"crop={sat_w}:{sat_h},volume=0[sat];"
+            f"crop={sat_w}:{sat_h}[sat];"
             f"[main][sat]vstack=inputs=2[v]"
         )
 
@@ -175,7 +178,7 @@ class VideoMerger:
             f"[0:v]scale={main_w}:{main_h}:force_original_aspect_ratio=increase,"
             f"crop={main_w}:{main_h}[main];"
             f"[1:v]scale={sat_w}:{sat_h}:force_original_aspect_ratio=increase,"
-            f"crop={sat_w}:{sat_h},volume=0[sat];"
+            f"crop={sat_w}:{sat_h}[sat];"
             f"[sat][main]vstack=inputs=2[v]"
         )
 
@@ -185,7 +188,7 @@ class VideoMerger:
             f"[0:v]scale={main_w}:{main_h}:force_original_aspect_ratio=increase,"
             f"crop={main_w}:{main_h}[main];"
             f"[1:v]scale={sat_w}:{sat_h}:force_original_aspect_ratio=increase,"
-            f"crop={sat_w}:{sat_h},volume=0[sat];"
+            f"crop={sat_w}:{sat_h}[sat];"
             f"[main][sat]hstack=inputs=2[v]"
         )
 
