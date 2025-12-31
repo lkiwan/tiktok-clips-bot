@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
 Local Video Processor for TikTok Clips Bot
-Run this on your PC to process videos locally (faster than cloud)
+Run this on your PC to process videos locally with ENHANCED features:
+- Karaoke-style subtitles
+- Split-screen with satisfying backgrounds
+- Face-aware cropping
 
 Usage:
     python local_processor.py
 
-The script will:
-1. Poll the bot for pending jobs every 30 seconds
-2. When a job is found, process it locally
-3. Send clips directly to Telegram
-4. Mark job as complete
-
 Requirements:
-    pip install requests yt-dlp faster-whisper moviepy groq
+    pip install requests yt-dlp faster-whisper moviepy groq mediapipe pillow
     FFmpeg must be installed and in PATH
 """
 
@@ -44,6 +41,16 @@ TELEGRAM_BOT_TOKEN = "8221904241:AAHVjoAyBEOHLgZrkV1oDK11RuzNu52CKp4"  # Your bo
 GROQ_API_KEY = ""  # Optional: Get free key from https://console.groq.com
 
 POLL_INTERVAL = 30  # Check for jobs every 30 seconds
+
+# Enhancement settings (ENABLED by default!)
+ENABLE_FACE_TRACKING = True     # Smart cropping for panoramic videos
+SUBTITLE_STYLE = 'karaoke'      # 'karaoke', 'highlight', 'box', 'simple'
+ENABLE_SPLIT_SCREEN = True      # Add satisfying background videos
+SPLIT_LAYOUT = 'top_bottom'     # 'top_bottom', 'bottom_top', 'left_right'
+
+# Get absolute path to satisfying videos folder
+SCRIPT_DIR = Path(__file__).parent.absolute()
+SATISFYING_FOLDER = str(SCRIPT_DIR / 'assets' / 'satisfying_videos')
 # ===========================================
 
 
@@ -163,44 +170,84 @@ def download_video(url, output_dir):
 
 
 def transcribe_video(video_path):
-    """Transcribe video using faster-whisper"""
-    log("Transcribing audio...")
+    """Transcribe video using faster-whisper with word-level timestamps for karaoke"""
+    log("Transcribing audio (with word timestamps for karaoke)...")
 
     from faster_whisper import WhisperModel
 
     model = WhisperModel("base", device="cpu", compute_type="int8")
-    segments, info = model.transcribe(video_path, beam_size=5, word_timestamps=True)
+    segments_iter, info = model.transcribe(video_path, beam_size=5, word_timestamps=True)
 
     transcript_segments = []
-    for segment in segments:
+    word_segments = []
+
+    for segment in segments_iter:
         transcript_segments.append({
             'start': segment.start,
             'end': segment.end,
             'text': segment.text.strip()
         })
 
+        # Extract word-level timestamps for karaoke subtitles
+        if hasattr(segment, 'words') and segment.words:
+            for word in segment.words:
+                word_segments.append({
+                    'start': word.start,
+                    'end': word.end,
+                    'word': word.word.strip()
+                })
+
+    log(f"Transcribed: {len(transcript_segments)} segments, {len(word_segments)} words")
+
     return {
         'segments': transcript_segments,
+        'word_segments': word_segments,
         'duration': info.duration
     }
 
 
 def select_clips_simple(transcript, num_clips, max_duration):
-    """Simple clip selection based on timing"""
+    """Simple clip selection - avoids intro and outro"""
     segments = transcript['segments']
     if not segments:
         return []
 
     total_duration = segments[-1]['end']
+
+    # Skip intro and outro (proportional to video length)
+    if total_duration < 300:  # < 5 minutes
+        skip_intro, skip_outro = 30, 30
+    elif total_duration < 1200:  # < 20 minutes
+        skip_intro, skip_outro = 60, 60
+    else:  # > 20 minutes
+        skip_intro, skip_outro = 90, 90
+
+    # Calculate usable range
+    usable_start = min(skip_intro, total_duration * 0.1)
+    usable_end = max(total_duration - skip_outro, total_duration * 0.9)
+    usable_duration = usable_end - usable_start
+
+    if usable_duration < max_duration:
+        usable_start, usable_end = 0, total_duration
+        usable_duration = total_duration
+
+    log(f"Skipping intro ({usable_start:.0f}s) and outro (after {usable_end:.0f}s)")
+
     clips = []
-    spacing = total_duration / (num_clips + 1)
+    spacing = usable_duration / (num_clips + 1)
 
     for i in range(num_clips):
-        target_time = spacing * (i + 1)
-        best_segment = min(segments, key=lambda s: abs(s['start'] - target_time))
+        target_time = usable_start + spacing * (i + 1)
 
-        start = max(0, best_segment['start'] - 5)
-        end = min(total_duration, start + min(max_duration, 45))
+        # Find segments in usable range
+        usable_segments = [s for s in segments if s['start'] >= usable_start and s['end'] <= usable_end]
+        if not usable_segments:
+            usable_segments = segments
+
+        best_segment = min(usable_segments, key=lambda s: abs(s['start'] - target_time))
+
+        start = max(usable_start, best_segment['start'] - 5)
+        end = min(usable_end, start + min(max_duration, 60))
 
         # Get text for caption
         clip_text = ""
@@ -337,8 +384,45 @@ def create_clip(video_path, start, end, srt_path, output_path):
         return False
 
 
+def generate_enhanced_clips_wrapper(video_path, clips, transcript, output_dir, config):
+    """Wrapper to generate clips with enhanced features (karaoke, split-screen)"""
+    try:
+        from scripts.enhanced import generate_enhanced_clips as gen_clips
+        return gen_clips(video_path, clips, transcript, output_dir, config)
+    except ImportError as e:
+        log(f"Enhanced modules not available: {e}")
+        log("Falling back to basic clip generation...")
+        return generate_clips_basic(video_path, clips, transcript, output_dir)
+
+
+def generate_clips_basic(video_path, clips, transcript, output_dir):
+    """Basic clip generation (fallback if enhanced not available)"""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    results = []
+    for i, clip in enumerate(clips, 1):
+        output_path = output_dir / f"clip_{i:02d}.mp4"
+        srt_path = output_dir / f"clip_{i:02d}.srt"
+
+        generate_srt(transcript, clip['start'], clip['end'], srt_path)
+
+        if create_clip(video_path, clip['start'], clip['end'], srt_path, output_path):
+            results.append({
+                'success': True,
+                'path': str(output_path),
+                'description': clip.get('description', ''),
+                'hashtags': clip.get('hashtags', ['fyp', 'viral']),
+                'features': {'subtitle_style': 'basic', 'split_screen': False}
+            })
+        else:
+            results.append({'success': False})
+
+    return results
+
+
 def process_job(job):
-    """Process a single job"""
+    """Process a single job with ENHANCED features (karaoke, split-screen)"""
     job_id = job['job_id']
     chat_id = job['chat_id']
     youtube_url = job['youtube_url']
@@ -348,55 +432,72 @@ def process_job(job):
     log(f"Processing job: {job_id}")
     log(f"URL: {youtube_url}")
     log(f"Clips: {num_clips}, Duration: {clip_duration}s")
+    log(f"Features: subtitles={SUBTITLE_STYLE}, split_screen={ENABLE_SPLIT_SCREEN}, face={ENABLE_FACE_TRACKING}")
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
 
         try:
             # Step 1: Download
-            update_progress(job_id, "📥 Downloading video...")
+            update_progress(job_id, "Downloading video...")
             video_info = download_video(youtube_url, temp_path)
             log(f"Downloaded: {video_info['title']}")
 
-            # Step 2: Transcribe
-            update_progress(job_id, "🎤 Transcribing audio...")
+            # Step 2: Transcribe (with word timestamps for karaoke)
+            update_progress(job_id, "Transcribing audio (with word timestamps)...")
             transcript = transcribe_video(video_info['video_path'])
-            log(f"Transcribed: {len(transcript['segments'])} segments")
 
-            # Step 3: Select clips
-            update_progress(job_id, "🧠 Selecting best moments...")
+            # Step 3: Select clips (skipping intro/outro)
+            update_progress(job_id, "AI selecting best moments...")
             clips = select_clips_ai(transcript, video_info, num_clips, clip_duration)
             log(f"Selected: {len(clips)} clips")
 
-            # Step 4: Generate clips
-            update_progress(job_id, "🎬 Generating clips...")
+            # Step 4: Generate clips with ENHANCED features
+            features_text = f"({SUBTITLE_STYLE} subtitles"
+            if ENABLE_FACE_TRACKING:
+                features_text += ", face tracking"
+            if ENABLE_SPLIT_SCREEN:
+                features_text += ", split screen"
+            features_text += ")"
+
+            update_progress(job_id, f"Generating professional clips {features_text}...")
             output_dir = temp_path / "output"
-            output_dir.mkdir(exist_ok=True)
 
-            generated_clips = []
-            for i, clip in enumerate(clips, 1):
-                log(f"Generating clip {i}/{len(clips)}...")
+            # Build config for enhanced generation
+            config = {
+                'enable_face_tracking': ENABLE_FACE_TRACKING,
+                'subtitle_style': SUBTITLE_STYLE,
+                'enable_split_screen': ENABLE_SPLIT_SCREEN,
+                'split_layout': SPLIT_LAYOUT,
+                'satisfying_folder': SATISFYING_FOLDER,
+                'output_width': 1080,
+                'output_height': 1920
+            }
 
-                output_path = output_dir / f"clip_{i:02d}.mp4"
-                srt_path = output_dir / f"clip_{i:02d}.srt"
+            generated_clips = generate_enhanced_clips_wrapper(
+                video_info['video_path'], clips, transcript, output_dir, config
+            )
 
-                generate_srt(transcript, clip['start'], clip['end'], srt_path)
-
-                if create_clip(video_info['video_path'], clip['start'], clip['end'], srt_path, output_path):
-                    generated_clips.append({
-                        'path': str(output_path),
-                        'description': clip.get('description', ''),
-                        'hashtags': clip.get('hashtags', ['fyp', 'viral'])
-                    })
+            # Filter successful clips
+            successful_clips = [c for c in generated_clips if c.get('success')]
+            log(f"Generated: {len(successful_clips)} clips successfully")
 
             # Step 5: Send to Telegram
-            update_progress(job_id, "📤 Sending clips...")
+            update_progress(job_id, f"Sending {len(successful_clips)} clips...")
 
-            for i, clip in enumerate(generated_clips, 1):
-                log(f"Sending clip {i}/{len(generated_clips)}...")
+            for i, clip in enumerate(successful_clips, 1):
+                log(f"Sending clip {i}/{len(successful_clips)}...")
 
-                hashtags = " ".join([f"#{tag}" for tag in clip['hashtags']])
-                caption = f"{clip['description']}\n\n{hashtags}\n\n👆 Copy and post to TikTok!"
+                hashtags = " ".join([f"#{tag}" for tag in clip.get('hashtags', ['fyp', 'viral'])])
+                caption = f"{clip.get('description', '')}\n\n{hashtags}\n\nCopy and post to TikTok!"
+
+                # Add feature badges
+                if 'features' in clip:
+                    features = clip['features']
+                    if features.get('subtitle_style') == 'karaoke':
+                        caption += "\n🎤 Karaoke subtitles"
+                    if features.get('split_screen'):
+                        caption += "\n🎮 Split-screen"
 
                 send_video_to_telegram(chat_id, clip['path'], caption)
                 time.sleep(2)
@@ -409,18 +510,25 @@ def process_job(job):
 
         except Exception as e:
             log(f"Error processing job: {e}")
+            import traceback
+            traceback.print_exc()
             fail_job(job_id, str(e), fallback=True)
             return False
 
 
 def main():
     """Main loop"""
-    print("=" * 50)
-    print("TikTok Clips Bot - Local Processor")
-    print("=" * 50)
+    print("=" * 60)
+    print("TikTok Clips Bot - ENHANCED Local Processor")
+    print("=" * 60)
     print(f"\nBot URL: {BOT_URL}")
     print(f"Poll interval: {POLL_INTERVAL}s")
-    print(f"Groq AI: {'Enabled' if GROQ_API_KEY else 'Disabled (using simple selection)'}")
+    print(f"\nEnhanced Features:")
+    print(f"  Subtitle style: {SUBTITLE_STYLE}")
+    print(f"  Split screen: {'ENABLED' if ENABLE_SPLIT_SCREEN else 'Disabled'}")
+    print(f"  Face tracking: {'Enabled' if ENABLE_FACE_TRACKING else 'Disabled'}")
+    print(f"  Groq AI: {'Enabled' if GROQ_API_KEY else 'Disabled (using simple selection)'}")
+    print(f"  Satisfying folder: {SATISFYING_FOLDER}")
     print("\nWaiting for jobs...")
     print("Press Ctrl+C to stop\n")
 
