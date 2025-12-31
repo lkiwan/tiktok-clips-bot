@@ -397,9 +397,14 @@ def process_job(job):
 
     # Get enhancement settings from job (or use defaults)
     enhancements = job.get('enhancements', {})
-    subtitle_style = enhancements.get('subtitle_style', SUBTITLE_STYLE)
-    enable_split_screen = enhancements.get('split_screen', ENABLE_SPLIT_SCREEN)
-    enable_face_tracking = enhancements.get('face_tracking', ENABLE_FACE_TRACKING)
+    log(f"Job enhancements from bot: {enhancements}")
+
+    # Use job settings if provided, otherwise use defaults
+    subtitle_style = enhancements.get('subtitle_style') or SUBTITLE_STYLE
+    enable_split_screen = enhancements.get('split_screen') if 'split_screen' in enhancements else ENABLE_SPLIT_SCREEN
+    enable_face_tracking = enhancements.get('face_tracking') if 'face_tracking' in enhancements else ENABLE_FACE_TRACKING
+
+    log(f"Final settings: subtitles={subtitle_style}, split={enable_split_screen}, face={enable_face_tracking}")
 
     log(f"Processing job: {job_id}")
     log(f"URL: {youtube_url}")
