@@ -45,7 +45,7 @@ POLL_INTERVAL = 30  # Check for jobs every 30 seconds
 # Enhancement settings
 ENABLE_FACE_TRACKING = True     # Smart cropping for panoramic videos
 SUBTITLE_STYLE = 'karaoke'      # 'karaoke', 'highlight', 'box', 'simple'
-ENABLE_SPLIT_SCREEN = False     # Add satisfying background
+ENABLE_SPLIT_SCREEN = True      # Add satisfying background (ENABLED by default)
 SPLIT_LAYOUT = 'top_bottom'     # 'top_bottom', 'bottom_top', 'left_right'
 
 # Get absolute path to satisfying videos folder
