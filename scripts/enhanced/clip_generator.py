@@ -128,15 +128,18 @@ class EnhancedClipGenerator:
                     category=self.config.get('satisfying_category', 'any')
                 )
 
-                # Clean up temp file
-                if temp_path.exists():
-                    temp_path.unlink()
-
                 if merge_result.get('success'):
+                    # Clean up temp file only if merge succeeded
+                    if temp_path.exists():
+                        temp_path.unlink()
                     return self._build_result(output_path, clip_data, duration, merge_result)
                 else:
-                    # Fallback: use temp as output
-                    return self._build_result(temp_path, clip_data, duration, {'layout': 'none'})
+                    # Merge failed - rename temp to output and use it
+                    print(f"    Merge failed, using clip without split-screen")
+                    if temp_path.exists():
+                        import shutil
+                        shutil.move(str(temp_path), str(output_path))
+                    return self._build_result(output_path, clip_data, duration, {'layout': 'none'})
             else:
                 return {'success': False, 'error': 'Failed to create clip'}
         else:
